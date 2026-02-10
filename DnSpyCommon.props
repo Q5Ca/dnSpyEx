@@ -6,7 +6,8 @@
         - .github/workflows/build.yml
         - DnSpyRoslyn.props
     NOTE: Update the ABOVE files when TargetFrameworks is updated -->
-    <TargetFrameworks>net48;net8.0-windows</TargetFrameworks>
+    <TargetFrameworks Condition=" '$(BuildNetFrameworkOnly)' == 'true' ">net48</TargetFrameworks>
+    <TargetFrameworks Condition=" '$(BuildNetFrameworkOnly)' != 'true' ">net48;net8.0-windows</TargetFrameworks>
     <IsDotNetFramework>false</IsDotNetFramework>
     <IsDotNet>false</IsDotNet>
     <IsSelfContainedDotNet>false</IsSelfContainedDotNet>
@@ -14,7 +15,8 @@
     <IsDotNet Condition=" !$(TargetFramework.StartsWith(net4)) ">true</IsDotNet>
     <IsSelfContainedDotNet Condition=" '$(IsDotNet)' == 'true' ">true</IsSelfContainedDotNet>
     <Features>strict;nullablePublicOnly</Features>
-    <LangVersion>latest</LangVersion>
+    <!-- Pin C# version to avoid new keyword collisions in newer SDKs -->
+    <LangVersion>12</LangVersion>
     <LangVersion Condition=" $(MSBuildProjectFile.EndsWith('.vbproj')) " >latest</LangVersion>
     <NeutralLanguage>en</NeutralLanguage>
     <AppDesignerFolderContentsVisibleOnlyInShowAllFiles>false</AppDesignerFolderContentsVisibleOnlyInShowAllFiles>

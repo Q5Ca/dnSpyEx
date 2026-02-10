@@ -15,17 +15,40 @@ $apphostpatcher_dir = "Build\AppHostPatcher"
 # The reason we don't use dotnet build is that dotnet build doesn't support COM references yet https://github.com/dnSpy/dnSpy/issues/1053
 #
 
+function Get-MsbuildPath {
+	if ($env:MSBUILD_EXE_PATH -and (Test-Path $env:MSBUILD_EXE_PATH)) {
+		return $env:MSBUILD_EXE_PATH
+	}
+
+	$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+	if (Test-Path $vswhere) {
+		$path = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+		if ($path -and (Test-Path $path)) {
+			return $path
+		}
+	}
+
+	return $null
+}
+
+function Assert-Msbuild {
+	$script:msbuildPath = Get-MsbuildPath
+	if (-not $script:msbuildPath) {
+		throw "MSBuild was not found. Install Visual Studio Build Tools (Desktop development with .NET) or set MSBUILD_EXE_PATH to MSBuild.exe."
+	}
+}
+
 function Build-NetFramework {
 	Write-Host 'Building .NET Framework x86 and x64 binaries'
 
 	$outdir = "$net_baseoutput\$netframework_tfm"
 
 	if ($NoMsbuild) {
-		dotnet build -v:m -c $configuration
+		dotnet build -v:m -c $configuration -p:BuildNetFrameworkOnly=true
 		if ($LASTEXITCODE) { exit $LASTEXITCODE }
 	}
 	else {
-		msbuild -v:m -m -restore -t:Build -p:Configuration=$configuration
+		& $script:msbuildPath -v:m -m -restore -t:Build -p:Configuration=$configuration -p:BuildNetFrameworkOnly=true
 		if ($LASTEXITCODE) { exit $LASTEXITCODE }
 	}
 
@@ -54,7 +77,7 @@ function Build-Net {
 		if ($LASTEXITCODE) { exit $LASTEXITCODE }
 	}
 	else {
-		msbuild -v:m -m -restore -t:Publish -p:Configuration=$configuration -p:TargetFramework=$net_tfm -p:RuntimeIdentifier=$rid -p:SelfContained=True
+		& $script:msbuildPath -v:m -m -restore -t:Publish -p:Configuration=$configuration -p:TargetFramework=$net_tfm -p:RuntimeIdentifier=$rid -p:SelfContained=True
 		if ($LASTEXITCODE) { exit $LASTEXITCODE }
 	}
 
@@ -81,9 +104,13 @@ if ($buildNetX86 -or $buildNetX64) {
 		if ($LASTEXITCODE) { exit $LASTEXITCODE }
 	}
 	else {
-		msbuild -v:m -m -restore -t:Build -p:Configuration=$configuration -p:TargetFramework=$netframework_tfm $apphostpatcher_dir\AppHostPatcher.csproj
+		& $script:msbuildPath -v:m -m -restore -t:Build -p:Configuration=$configuration -p:TargetFramework=$netframework_tfm $apphostpatcher_dir\AppHostPatcher.csproj
 		if ($LASTEXITCODE) { exit $LASTEXITCODE }
 	}
+}
+
+if (-not $NoMsbuild) {
+	Assert-Msbuild
 }
 
 if ($buildNet) {
