@@ -194,6 +194,10 @@ def main() -> int:
             tname("break_all"),
             tname("continue"),
             tname("get_status"),
+            tname("get_stack_trace"),
+            tname("get_variables"),
+            tname("evaluate_expression"),
+            tname("get_method_debug_map"),
             tname("set_breakpoint_text"),
             tname("list_breakpoints"),
         }
@@ -284,6 +288,7 @@ def main() -> int:
                         "decompiled_line_contains": "int sum = Add",
                         "occurrence": 1,
                         "assembly_name": "McpDebugTarget",
+                        "module_path": debug_target_exe,
                     },
                     timeout_s=20,
                 )
@@ -302,11 +307,79 @@ def main() -> int:
                         print("get_loaded_assemblies: error:", str(exc))
                 return 4
 
+            debug_map_json = call_tool(
+                tname("get_method_debug_map"),
+                {
+                    "full_type_name": "McpDebugTarget.Worker",
+                    "method_name": "Compute",
+                    "assembly_name": "McpDebugTarget",
+                    "module_path": debug_target_exe,
+                },
+                timeout_s=20,
+            )
+            print("get_method_debug_map:", debug_map_json)
+            if not isinstance(debug_map_json, dict) or debug_map_json.get("ok") is False:
+                print("error: get_method_debug_map failed")
+                return 12
+            if not isinstance(debug_map_json.get("sequence_points"), list) or len(debug_map_json["sequence_points"]) == 0:
+                print("error: get_method_debug_map has no sequence_points")
+                return 13
+
             deadline = time.time() + args.timeout_seconds
             while time.time() < deadline:
                 st_json = call_tool(tname("get_status"), {}, timeout_s=10)
                 if st_json.get("state") == "break":
                     print("get_status (break):", st_json)
+                    st_compact_json = call_tool(tname("get_status"), {"mode": "compact"}, timeout_s=10)
+                    print("get_status (compact):", st_compact_json)
+                    stack_json = call_tool(tname("get_stack_trace"), {"max_frames": 10}, timeout_s=10)
+                    print("get_stack_trace:", stack_json)
+                    stack_compact_json = call_tool(tname("get_stack_trace"), {"max_frames": 10, "mode": "compact"}, timeout_s=10)
+                    print("get_stack_trace (compact):", stack_compact_json)
+
+                    vars_json = call_tool(tname("get_variables"), {"frame_index": 0, "max_items": 100}, timeout_s=12)
+                    print("get_variables:", vars_json)
+                    vars_compact_json = call_tool(
+                        tname("get_variables"),
+                        {"frame_index": 0, "max_items": 100, "mode": "compact"},
+                        timeout_s=12,
+                    )
+                    print("get_variables (compact):", vars_compact_json)
+
+                    eval_json = call_tool(
+                        tname("evaluate_expression"),
+                        {"expression": "baseValue + value", "frame_index": 0},
+                        timeout_s=12,
+                    )
+                    print("evaluate_expression:", eval_json)
+                    eval_error_json = call_tool(
+                        tname("evaluate_expression"),
+                        {"expression": "baseValue +", "frame_index": 0},
+                        timeout_s=12,
+                    )
+                    print("evaluate_expression (error):", eval_error_json)
+
+                    if not isinstance(stack_json, dict) or not isinstance(stack_json.get("frames"), list) or len(stack_json["frames"]) == 0:
+                        print("error: get_stack_trace returned no frames")
+                        return 5
+                    if not isinstance(stack_compact_json, dict) or stack_compact_json.get("mode") != "compact":
+                        print("error: get_stack_trace compact mode missing")
+                        return 8
+                    if not isinstance(vars_json, dict) or not isinstance(vars_json.get("variables"), list) or len(vars_json["variables"]) == 0:
+                        print("error: get_variables returned no variables")
+                        return 6
+                    if not isinstance(vars_compact_json, dict) or vars_compact_json.get("mode") != "compact":
+                        print("error: get_variables compact mode missing")
+                        return 9
+                    if not isinstance(eval_json, dict) or eval_json.get("ok") is not True:
+                        print("error: evaluate_expression failed")
+                        return 7
+                    if not isinstance(eval_error_json, dict) or eval_error_json.get("ok") is not False or "error_code" not in eval_error_json:
+                        print("error: evaluate_expression error_code missing")
+                        return 10
+                    if not isinstance(st_compact_json, dict) or "last_process_id" not in st_compact_json or "last_thread_id" not in st_compact_json:
+                        print("error: get_status compact missing stable ids")
+                        return 11
                     return 0
                 time.sleep(0.5)
             print("get_status (timeout):", call_tool(tname("get_status"), {}, timeout_s=10))

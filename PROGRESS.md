@@ -11,6 +11,15 @@
   - `attach`, `get_status`, `set_breakpoint_text`, `open_all_modules`, `open_file`, etc.
 - Kept backward compatibility for existing clients by accepting legacy `dnspy.*` names in `tools/call`.
 - Added and hardened `open_all_modules` flow and smoke-test sequencing to reduce race conditions.
+- Added new debugger-inspection MCP tools:
+  - `get_stack_trace` (formatted call stack for current/selected thread)
+  - `get_variables` (locals/arguments with formatted values/types at selected frame)
+  - `evaluate_expression` (evaluate expression/code in selected frame, with side-effect/func-eval controls)
+- Addressed agent UX review improvements:
+  - `get_status` now keeps `current_process_id` / `current_thread_id` consistent (same thread source) and includes `last_process_id` / `last_thread_id`.
+  - Added compact modes: `get_stack_trace(mode='compact')`, `get_variables(mode='compact')`.
+  - Added machine-readable `error_code` in `evaluate_expression` failures.
+  - Normalized error envelope at MCP server `tools/call`: auto-adds `ok=false`, `error_code`, `isError=true` when tool returns an error object.
 - Extended `list_breakpoints` to include decompiled source mapping fields per breakpoint:
   - `decompiled_line_number`
   - `decompiled_line_text`
@@ -22,9 +31,60 @@
   - Parse both legacy (`content[0].json`) and current (`structuredContent`) tool responses
   - Optionally simulate agent delay between calls
   - Clear breakpoints and wait for module visibility before setting breakpoints
+- Optimized `get_status` for polling:
+  - Added `mode` argument: `verbose` (default) or `compact`
+  - Added `include_context` argument (default: `true` in verbose mode, `false` in compact mode)
+  - `compact` mode avoids resolving/returning decompiled context block unless explicitly requested.
+- Added step/status UX hardening:
+  - `step_over` / `step_into` / `step_out` now return structured non-success when stepping is invalid at the current frame:
+    - `error_code: "step_not_possible_here"`
+    - `error_details` includes `step_kind`, `current_frame_kind`, `location_type`, `il_offset_mapping`
+  - `get_status` now includes `current_frame_kind` for client-side gating (`managed`, `native_transition`, `native`).
+  - `last_process_id` / `last_thread_id` are now resolved as a stable pair (both set or both null).
+- Added new MCP tool: `get_method_debug_map`
+  - Input: `full_type_name`, `method_name`, optional `assembly_name` / `module_name` / `module_path`
+  - Output:
+    - `sequence_points` with IL span + decompiled line/column mapping
+    - `locals` with slot/scope/name mapping (`slot`, `runtime_name`, `decompiled_name`, `pdb_name`, `il_start`, `il_end`)
+    - `args` with index/name mapping (`index`, `runtime_name`, `decompiled_name`, `pdb_name`, `is_hidden_this`)
+  - Includes `text_span_end_is_exclusive=true` for `end_line`/`end_col` interpretation.
 - Created Codex skill:
   - `C:/Users/Administrator/.codex/skills/dnspy-mcp-debugging`
   - Validated with skill validator.
+- Confirmed dnSpy code semantics from source:
+  - Multi-target debugging is supported (`DbgManager.Processes`, `RunAll`, `BreakAll`, `DetachAll`, and attach dialog can start multiple selected targets).
+  - Document/module dedup is key-based in normal `TryGetOrCreateInternal` flow, but not absolute because `ForceAdd` paths can still insert duplicates.
+- Cleared stale break context as requested:
+  - `last_break` is now cleared on `attach` (before `proc.Attach()`),
+  - on `detach`,
+  - and on debugger `MessageProcessExited`.
+- Optimized decompile-driven tools to avoid tab buildup:
+  - Root cause: MCP decompile helper opened a new document tab per call and never closed it.
+  - Implemented `GetMethodDecompiledSnapshot()` with:
+    - immediate auto-close of the temporary tab after snapshot capture
+    - in-memory cache (TTL 5 minutes, max 128 methods) keyed by module path + method token
+  - Updated call sites to use cached snapshots:
+    - `set_breakpoint_text`
+    - `get_method_debug_map`
+    - status/breakpoint decompiled-line resolvers
+- Hardened temporary-tab close behavior:
+  - Fixed `ObjectDisposedException` by deferring temp-tab close to dispatcher idle instead of closing inline during `FollowReference(... onShown ...)`.
+  - Prevents race with dnSpy's internal move-caret/show pipeline.
+- Added ambiguity selectors and structured errors for breakpoint placement:
+  - `set_breakpoint_text` now accepts optional `process_id` and `module_id`.
+  - Resolution order implemented:
+    - `module_id` -> `module_path` -> (`process_id` + `assembly_name`) -> `assembly_name`
+  - Ambiguous matches now return:
+    - `ok=false`
+    - `error_code=\"ambiguous_target\"`
+    - `error=\"Multiple matching methods found.\"`
+    - `candidates[]` with `module_id`, `process_id`, `module_path`, `full_type_name`, `method_name`, `token_hex`
+- Updated `classes_from_namespace`:
+  - Returns structured object payload (`ok`, `classes[]`) instead of a flat string.
+  - Added optional `process_id` parameter (not required) for scoped results.
+  - Dedup key is now `(module_id, full_type_name)`.
+  - Each row includes:
+    - `full_type_name`, `module_id`, `module_path`, `assembly_name`, `process_id`
 
 ## Verification
 
@@ -34,10 +94,60 @@
 - Runtime checks:
   - `tools/list` now returns short tool names.
   - Legacy `dnspy.get_status` still works via alias normalization.
+  - `tools/list` includes new tools: `get_stack_trace`, `get_variables`, `evaluate_expression`.
+  - `tools/list` reflects new compact-mode params for stack/variables and updated status/eval descriptions.
   - `list_breakpoints` now resolves and returns decompiled line info when module metadata is available in the Assembly Explorer tree.
+- `get_status` now includes `current_stop` when stopped, with:
+    - live `token_hex` and `il_offset`
+    - module/assembly identifiers
+    - decompiled method/type/line mapping
+    - 3-line context block with `>` marker at current stopped line
+- `get_status` mode support verified:
+  - `mode=compact` returns a smaller polling payload (`state/reason/location`-focused)
+  - `include_context=true` in compact mode includes decompiled context fields on demand
+  - `include_context=false` in verbose mode omits decompiled context fields
   - Updated step tool descriptions to concise user phrasing:
     - `step_over`: "Step over in decompiled view."
     - `step_into`: "Step into in decompiled view."
     - `step_out`: "Step out in decompiled view."
+  - Added explicit step completion analysis in `get_status.last_break.step`:
+    - `RequestedStep`
+    - `EnteredNewMethod`
+    - `ReasonCode`
+    - `Reason`
+    - `EngineError`
+    - `LikelyCauses` (for ambiguous step-into no-enter cases)
+    - `Before` / `After` location snapshots (`TokenHex`, `ILOffset`, module/assembly)
   - Smoke test passes:
     - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --timeout-seconds 40 --simulate-agent-delay --agent-delay-seconds 1.0`
+  - Smoke test also validates new debug tools at breakpoint:
+    - `get_stack_trace` returns frames (formatted, token/IL info)
+    - `get_variables` returns locals/params with formatted name/value/type
+    - `evaluate_expression` succeeds on `baseValue + value` with typed result
+    - `get_method_debug_map` returns non-empty `sequence_points` for `McpDebugTarget.Worker.Compute`
+    - compact mode calls succeed for `get_status`, `get_stack_trace`, and `get_variables`
+    - failing `evaluate_expression` returns machine-readable `error_code` (`compile_error` observed)
+  - Additional status mode validation:
+    - `get_status` compact/verbose payload keys validated via `tools\\mcp_client.py` and direct RPC checks.
+  - Error envelope normalization check:
+    - `remove_breakpoint` on missing id now returns `ok=false`, `error_code=\"tool_error\"`, and `isError=true`.
+  - Manual targeted verification:
+    - `get_status(mode=\"compact\")` includes `current_frame_kind` and returns paired `last_process_id` / `last_thread_id`.
+    - At a `Compute` breakpoint, `current_frame_kind` resolves to `managed` and `step_over` returns `ok=true` (no forced false-negative on CorDebug-native-backed managed locations).
+    - `step_not_possible_here` remains implemented with machine-readable details for non-steppable frames (`current_frame_kind`, `location_type`, `il_offset_mapping`).
+  - New verification for stale-break reset:
+    - Build success with `dotnet msbuild Extensions\\Examples\\Example1.Extension\\Example1.Extension.csproj /t:Build /p:Configuration=Debug /m`.
+    - Live MCP check confirms `last_break` clears on process exit:
+      - attach -> hit breakpoint (`last_break` populated) -> continue until target exits -> `get_status` returns `last_break = null`.
+    - `attach` and `detach` reset paths are wired directly in code (`Global.DebugState.ClearLastBreak()` in both command handlers).
+  - New verification for tab-buildup fix and cache behavior:
+    - Build success after stopping locked `dnSpy.exe` process.
+    - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --timeout-seconds 45 --simulate-agent-delay --agent-delay-seconds 0.4` passes.
+    - Repeated calls complete quickly and successfully:
+      - `get_method_debug_map` x30
+      - `set_breakpoint_text` x20
+  - Additional validation:
+    - `set_breakpoint_text` ambiguity now returns `error_code=\"ambiguous_target\"` with structured `candidates`.
+    - `classes_from_namespace` returns structured payload with `ok` and `classes`.
+    - Full smoke test still passes after these changes:
+      - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --timeout-seconds 60 --simulate-agent-delay --agent-delay-seconds 0.6`

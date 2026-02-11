@@ -14,6 +14,7 @@ using dnSpy.Contracts.Debugger;
 using dnSpy.Contracts.Debugger.Attach;
 using dnSpy.Contracts.Debugger.Breakpoints.Code;
 using dnSpy.Contracts.Debugger.DotNet.Code;
+using dnSpy.Contracts.Debugger.Evaluation;
 using dnSpy.Contracts.Documents.Tabs;
 using dnSpy.Contracts.Documents.TreeView;
 using dnSpy.Contracts.Metadata;
@@ -28,6 +29,7 @@ namespace Example1.Extension {
 		public static AttachableProcessesService? AttachableProcessesService;
 		public static DbgCodeBreakpointsService? DbgCodeBreakpointsService;
 		public static DbgDotNetCodeLocationFactory? DbgDotNetCodeLocationFactory;
+		public static DbgLanguageService? DbgLanguageService;
 		public static IModuleIdProvider? ModuleIdProvider;
 		public static McpDebugState DebugState { get; } = new McpDebugState();
 	}
@@ -36,6 +38,7 @@ namespace Example1.Extension {
 		readonly object gate = new object();
 		bool attached;
 		LastBreakInfo? lastBreak;
+		readonly Dictionary<ulong, StepRequestInfo> pendingStepsByThread = new Dictionary<ulong, StepRequestInfo>();
 
 		public void Attach(DbgManager manager) {
 			if (attached)
@@ -44,11 +47,13 @@ namespace Example1.Extension {
 			manager.MessageBoundBreakpoint += (s, e) => UpdateLastBreak(new LastBreakInfo {
 				Kind = "breakpoint",
 				BreakpointId = e.BoundBreakpoint?.Breakpoint?.Id,
+				ProcessId = e.Thread?.Process.Id,
 				ThreadId = e.Thread?.Id,
 				Message = "Breakpoint hit"
 			});
 			manager.MessageExceptionThrown += (s, e) => UpdateLastBreak(new LastBreakInfo {
 				Kind = "exception",
+				ProcessId = e.Exception.Thread?.Process.Id,
 				ThreadId = e.Exception.Thread?.Id,
 				Exception = new {
 					id = e.Exception.Id.ToString(),
@@ -63,26 +68,35 @@ namespace Example1.Extension {
 				},
 				Message = e.Exception.Message
 			});
-			manager.MessageStepComplete += (s, e) => UpdateLastBreak(new LastBreakInfo {
-				Kind = "step_complete",
-				ThreadId = e.Thread.Id,
-				Message = e.Error
-			});
+			manager.MessageStepComplete += (s, e) => {
+				var step = BuildStepCompleteInfo(e.Thread, e.Error, out var msg);
+				UpdateLastBreak(new LastBreakInfo {
+					Kind = "step_complete",
+					ProcessId = e.Thread.Process.Id,
+					ThreadId = e.Thread.Id,
+					Message = msg,
+					Step = step,
+				});
+			};
 			manager.MessageProgramBreak += (s, e) => UpdateLastBreak(new LastBreakInfo {
 				Kind = "program_break",
+				ProcessId = e.Thread?.Process.Id,
 				ThreadId = e.Thread?.Id,
 				Message = "Program break"
 			});
 			manager.MessageEntryPointBreak += (s, e) => UpdateLastBreak(new LastBreakInfo {
 				Kind = "entry_point_break",
+				ProcessId = e.Thread?.Process.Id,
 				ThreadId = e.Thread?.Id,
 				Message = "Entry point break"
 			});
 			manager.MessageBreak += (s, e) => UpdateLastBreak(new LastBreakInfo {
 				Kind = "break",
+				ProcessId = e.Thread?.Process.Id,
 				ThreadId = e.Thread?.Id,
 				Message = "Break"
 			});
+			manager.MessageProcessExited += (s, e) => ClearLastBreak();
 		}
 
 		void UpdateLastBreak(LastBreakInfo info) {
@@ -97,15 +111,157 @@ namespace Example1.Extension {
 				return lastBreak;
 			}
 		}
+
+		public void ClearLastBreak() {
+			lock (gate) {
+				lastBreak = null;
+				pendingStepsByThread.Clear();
+			}
+		}
+
+		public void RecordStepRequest(string stepKind, DbgThread thread) {
+			var info = new StepRequestInfo {
+				StepKind = stepKind,
+				ThreadId = thread.Id,
+				RequestedUtc = DateTime.UtcNow,
+				Before = GetDotNetLocation(thread),
+			};
+			lock (gate) {
+				pendingStepsByThread[thread.Id] = info;
+			}
+		}
+
+		StepCompleteInfo BuildStepCompleteInfo(DbgThread thread, string? error, out string message) {
+			StepRequestInfo? req = null;
+			lock (gate) {
+				if (pendingStepsByThread.TryGetValue(thread.Id, out var found)) {
+					req = found;
+					pendingStepsByThread.Remove(thread.Id);
+				}
+			}
+
+			var after = GetDotNetLocation(thread);
+			bool? enteredNewMethod = null;
+			if (req?.Before != null && after != null)
+				enteredNewMethod = !IsSameMethod(req.Before, after);
+
+			var info = new StepCompleteInfo {
+				RequestedStep = req?.StepKind,
+				EnteredNewMethod = enteredNewMethod,
+				EngineError = error,
+				Before = req?.Before,
+				After = after,
+			};
+
+			if (error != null) {
+				info.ReasonCode = InferReasonCode(error);
+				info.Reason = error;
+				message = error;
+				return info;
+			}
+
+			var requested = req?.StepKind ?? string.Empty;
+			if (string.Equals(requested, "StepInto", StringComparison.OrdinalIgnoreCase)) {
+				if (enteredNewMethod == true) {
+					info.ReasonCode = "entered_new_method";
+					info.Reason = "StepInto entered a called method.";
+					message = info.Reason;
+					return info;
+				}
+
+				info.ReasonCode = "step_into_no_enter";
+				if (req?.Before == null || after == null) {
+					info.Reason = "StepInto did not enter because no .NET location/sequence point was available.";
+				}
+				else {
+					info.Reason = "StepInto did not enter a new method. Likely causes: optimized or inlined call, no sequence point, or step filter.";
+				}
+				info.LikelyCauses = new[] { "optimized", "inlined", "no_sequence_point", "step_filter" };
+				message = info.Reason;
+				return info;
+			}
+
+			if (!string.IsNullOrEmpty(requested)) {
+				info.ReasonCode = "step_completed";
+				info.Reason = requested + " completed.";
+				message = info.Reason;
+				return info;
+			}
+
+			info.ReasonCode = "step_completed";
+			info.Reason = "Step completed.";
+			message = info.Reason;
+			return info;
+		}
+
+		static string InferReasonCode(string error) {
+			var s = error.ToLowerInvariant();
+			if (s.Contains("inline"))
+				return "inlined";
+			if (s.Contains("optim"))
+				return "optimized";
+			if (s.Contains("sequence"))
+				return "no_sequence_point";
+			if (s.Contains("filter"))
+				return "step_filter";
+			return "engine_error";
+		}
+
+		static bool IsSameMethod(DotNetLocationInfo a, DotNetLocationInfo b) {
+			return string.Equals(a.AssemblyFullName, b.AssemblyFullName, StringComparison.OrdinalIgnoreCase) &&
+				string.Equals(a.ModuleName, b.ModuleName, StringComparison.OrdinalIgnoreCase) &&
+				a.Token == b.Token;
+		}
+
+		static DotNetLocationInfo? GetDotNetLocation(DbgThread thread) {
+			var frame = thread.GetTopStackFrame();
+			var loc = frame?.Location as IDbgDotNetCodeLocation;
+			if (loc == null)
+				return null;
+			return new DotNetLocationInfo {
+				ModuleName = loc.Module.ModuleName ?? string.Empty,
+				AssemblyFullName = loc.Module.AssemblyFullName ?? string.Empty,
+				Token = loc.Token,
+				ILOffset = loc.Offset,
+			};
+		}
 	}
 
 	sealed class LastBreakInfo {
 		public string? Kind { get; set; }
 		public int? BreakpointId { get; set; }
+		public int? ProcessId { get; set; }
 		public ulong? ThreadId { get; set; }
 		public object? Exception { get; set; }
 		public string? Message { get; set; }
+		public object? Step { get; set; }
 		public DateTime Utc { get; set; }
+	}
+
+	sealed class StepRequestInfo {
+		public string StepKind { get; set; } = "";
+		public ulong ThreadId { get; set; }
+		public DateTime RequestedUtc { get; set; }
+		public DotNetLocationInfo? Before { get; set; }
+	}
+
+	sealed class DotNetLocationInfo {
+		public string ModuleName { get; set; } = "";
+		public string AssemblyFullName { get; set; } = "";
+		public uint Token { get; set; }
+		public uint ILOffset { get; set; }
+		public string TokenHex => "0x" + Token.ToString("X8");
+	}
+
+	sealed class StepCompleteInfo {
+		public string? RequestedStep { get; set; }
+		public bool? EnteredNewMethod { get; set; }
+		public string ReasonCode { get; set; } = "";
+		public string Reason { get; set; } = "";
+		public string? EngineError { get; set; }
+		public string[]? LikelyCauses { get; set; }
+		public DotNetLocationInfo? Before { get; set; }
+		public DotNetLocationInfo? After { get; set; }
 	}
 
 	class SimpleMcpServer {
@@ -433,14 +589,65 @@ namespace Example1.Extension {
 			}
 
 			var result = method.Invoke(null, invokeArgs);
-			var text = result == null
+			var normalized = NormalizeToolResult(result, out var isError);
+			var text = normalized == null
 				? "null"
-				: (result is string s ? s : jsonSerializer.Serialize(result));
+				: (normalized is string s ? s : jsonSerializer.Serialize(normalized));
 			return new {
 				content = new[] { new { type = "text", text } },
-				structuredContent = result,
-				isError = false
+				structuredContent = normalized,
+				isError
 			};
+		}
+
+		object? NormalizeToolResult(object? result, out bool isError) {
+			isError = false;
+			if (result == null)
+				return null;
+			if (result is string)
+				return result;
+
+			var dict = TryToDictionary(result);
+			if (dict == null)
+				return result;
+
+			bool hasError = dict.TryGetValue("error", out var errObj) &&
+				errObj != null &&
+				(!(errObj is string s) || !string.IsNullOrWhiteSpace(s));
+			bool okFalse = dict.TryGetValue("ok", out var okObj) && okObj is bool b && !b;
+
+			if (!hasError && !okFalse)
+				return result;
+
+			isError = true;
+			if (!dict.ContainsKey("ok"))
+				dict["ok"] = false;
+			if (!dict.ContainsKey("error_code"))
+				dict["error_code"] = "tool_error";
+
+			if (!dict.ContainsKey("error_details")) {
+				var details = new Dictionary<string, object>();
+				foreach (var kv in dict) {
+					if (kv.Key == "ok" || kv.Key == "error" || kv.Key == "error_code" || kv.Key == "error_details")
+						continue;
+					details[kv.Key] = kv.Value;
+				}
+				if (details.Count != 0)
+					dict["error_details"] = details;
+			}
+
+			return dict;
+		}
+
+		Dictionary<string, object>? TryToDictionary(object value) {
+			try {
+				var json = jsonSerializer.Serialize(value);
+				var obj = jsonSerializer.DeserializeObject(json);
+				return obj as Dictionary<string, object>;
+			}
+			catch {
+				return null;
+			}
 		}
 
 		void SendSseResult(string sessionId, object? id, object result) {

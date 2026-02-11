@@ -13,6 +13,7 @@ using dnSpy.Contracts.Debugger;
 using dnSpy.Contracts.Debugger.Attach;
 using dnSpy.Contracts.Debugger.Breakpoints.Code;
 using dnSpy.Contracts.Debugger.DotNet.Code;
+using dnSpy.Contracts.Debugger.Evaluation;
 using dnSpy.Contracts.Decompiler;
 using dnSpy.Contracts.Documents.Tabs;
 using dnSpy.Contracts.Documents.TreeView;
@@ -36,6 +37,7 @@ namespace Example1.Extension {
 		[Import] public Lazy<AttachableProcessesService> AttachableProcessesService = null!;
 		[Import] public Lazy<DbgCodeBreakpointsService> DbgCodeBreakpointsService = null!;
 		[Import] public Lazy<DbgDotNetCodeLocationFactory> DbgDotNetCodeLocationFactory = null!;
+		[Import] public Lazy<DbgLanguageService> DbgLanguageService = null!;
 		[Import] public IModuleIdProvider ModuleIdProvider = null!;
 
 		public IEnumerable<string> MergedResourceDictionaries {
@@ -57,6 +59,7 @@ namespace Example1.Extension {
 						Global.AttachableProcessesService = AttachableProcessesService.Value;
 						Global.DbgCodeBreakpointsService = DbgCodeBreakpointsService.Value;
 						Global.DbgDotNetCodeLocationFactory = DbgDotNetCodeLocationFactory.Value;
+						Global.DbgLanguageService = DbgLanguageService.Value;
 						Global.ModuleIdProvider = ModuleIdProvider;
 
 						Global.DebugState.Attach(Global.DbgManager);
