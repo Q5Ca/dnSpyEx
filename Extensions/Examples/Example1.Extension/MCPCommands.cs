@@ -64,7 +64,7 @@ namespace Example1.Extension {
 			return result;
 		}
 
-		[Command("dnspy.attach", MCPCmdDescription = "Attach to a process by ID.")]
+		[Command("attach", MCPCmdDescription = "Attach to a process by ID.")]
 		public static object Attach(int process_id) {
 			if (Global.AttachableProcessesService == null || Global.DbgManager == null)
 				return new { error = "Debugger services not available." };
@@ -92,13 +92,13 @@ namespace Example1.Extension {
 			};
 		}
 
-		[Command("dnspy.list_breakpoints", MCPCmdDescription = "List all breakpoints with IDs and locations.")]
+		[Command("list_breakpoints", MCPCmdDescription = "List all breakpoints with IDs and locations.")]
 		public static object ListBreakpoints() {
 			if (Global.DbgCodeBreakpointsService == null || Global.DbgManager == null)
 				return new { error = "Breakpoint service not available." };
 
-			return RunOnDbgDispatcher(() => {
-				var list = new List<object>();
+			var snapshots = RunOnDbgDispatcher(() => {
+				var list = new List<BreakpointSnapshot>();
 				foreach (var bp in Global.DbgCodeBreakpointsService.Breakpoints) {
 					var loc = bp.Location as IDbgDotNetCodeLocation;
 					var msg = bp.BoundBreakpointsMessage;
@@ -110,25 +110,56 @@ namespace Example1.Extension {
 						address = bb.HasAddress ? "0x" + bb.Address.ToString("X") : null,
 						message = new { severity = bb.Message.Severity.ToString(), message = bb.Message.Message }
 					}).ToArray();
-					list.Add(new {
-						id = bp.Id,
-						enabled = bp.IsEnabled,
-						bound_breakpoints_count = bound.Length,
-						bound_breakpoints_message = new { severity = msg.Severity.ToString(), message = msg.Message },
-						bound_breakpoints = bound,
-						location = loc == null ? null : new {
-							token_hex = "0x" + loc.Token.ToString("X8"),
-							il_offset = loc.Offset,
-							module_name = loc.Module.ModuleName,
-							assembly_full_name = loc.Module.AssemblyFullName
-						}
+					list.Add(new BreakpointSnapshot {
+						Id = bp.Id,
+						Enabled = bp.IsEnabled,
+						BoundBreakpoints = bound,
+						BoundBreakpointsMessageSeverity = msg.Severity.ToString(),
+						BoundBreakpointsMessageText = msg.Message,
+						Token = loc?.Token,
+						ILOffset = loc?.Offset,
+						ModuleName = loc?.Module.ModuleName,
+						AssemblyFullName = loc?.Module.AssemblyFullName,
 					});
 				}
-				return (object)list;
+				return list;
 			});
+
+			var cache = new Dictionary<string, DecompiledLocationInfo>(StringComparer.OrdinalIgnoreCase);
+			var result = new List<object>(snapshots.Count);
+			foreach (var bp in snapshots) {
+				DecompiledLocationInfo? dec = null;
+				if (bp.Token != null && bp.ILOffset != null && !string.IsNullOrWhiteSpace(bp.ModuleName) && !string.IsNullOrWhiteSpace(bp.AssemblyFullName)) {
+					var key = bp.AssemblyFullName + "|" + bp.ModuleName + "|" + bp.Token.Value.ToString("X8") + "|" + bp.ILOffset.Value;
+					if (!cache.TryGetValue(key, out dec)) {
+						dec = ResolveDecompiledLocation(bp.AssemblyFullName!, bp.ModuleName!, bp.Token.Value, bp.ILOffset.Value);
+						cache[key] = dec;
+					}
+				}
+
+				result.Add(new {
+					id = bp.Id,
+					enabled = bp.Enabled,
+					bound_breakpoints_count = bp.BoundBreakpoints.Length,
+					bound_breakpoints_message = new { severity = bp.BoundBreakpointsMessageSeverity, message = bp.BoundBreakpointsMessageText },
+					bound_breakpoints = bp.BoundBreakpoints,
+					location = bp.Token == null || bp.ILOffset == null ? null : new {
+						token_hex = "0x" + bp.Token.Value.ToString("X8"),
+						il_offset = bp.ILOffset.Value,
+						module_name = bp.ModuleName,
+						assembly_full_name = bp.AssemblyFullName
+					},
+					decompiled_line_number = dec?.LineNumber,
+					decompiled_line_text = dec?.LineText,
+					decompiled_full_type_name = dec?.FullTypeName,
+					decompiled_method_name = dec?.MethodName,
+					decompiled_resolve_error = dec?.Error
+				});
+			}
+			return result;
 		}
 
-		[Command("dnspy.set_breakpoint_text", MCPCmdDescription = "Set a breakpoint by decompiled text anchor.")]
+		[Command("set_breakpoint_text", MCPCmdDescription = "Set a breakpoint by decompiled text anchor.")]
 		public static object SetBreakpointText(
 			string full_type_name,
 			string method_name,
@@ -258,7 +289,7 @@ namespace Example1.Extension {
 			};
 		}
 
-		[Command("dnspy.remove_breakpoint", MCPCmdDescription = "Remove a breakpoint by ID.")]
+		[Command("remove_breakpoint", MCPCmdDescription = "Remove a breakpoint by ID.")]
 		public static object RemoveBreakpoint(int id) {
 			if (Global.DbgCodeBreakpointsService == null || Global.DbgManager == null)
 				return new { error = "Breakpoint service not available." };
@@ -272,22 +303,22 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.continue", MCPCmdDescription = "Continue execution.")]
+		[Command("continue", MCPCmdDescription = "Continue execution.")]
 		public static object Continue() => RunManagerAction(mgr => mgr.RunAll());
 
-		[Command("dnspy.break_all", MCPCmdDescription = "Break all debugged processes.")]
+		[Command("break_all", MCPCmdDescription = "Break all debugged processes.")]
 		public static object BreakAll() => RunManagerAction(mgr => mgr.BreakAll());
 
-		[Command("dnspy.step_over", MCPCmdDescription = "Step over.")]
+		[Command("step_over", MCPCmdDescription = "Step over.")]
 		public static object StepOver() => Step(DbgStepKind.StepOver);
 
-		[Command("dnspy.step_into", MCPCmdDescription = "Step into.")]
+		[Command("step_into", MCPCmdDescription = "Step into.")]
 		public static object StepInto() => Step(DbgStepKind.StepInto);
 
-		[Command("dnspy.step_out", MCPCmdDescription = "Step out.")]
+		[Command("step_out", MCPCmdDescription = "Step out.")]
 		public static object StepOut() => Step(DbgStepKind.StepOut);
 
-		[Command("dnspy.get_status", MCPCmdDescription = "Get current debugger state and last break.")]
+		[Command("get_status", MCPCmdDescription = "Get current debugger state and last break.")]
 		public static object GetStatus() {
 			if (Global.DbgManager == null)
 				return new { error = "Debugger not available." };
@@ -320,10 +351,10 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.detach", MCPCmdDescription = "Detach from all debugged processes.")]
+		[Command("detach", MCPCmdDescription = "Detach from all debugged processes.")]
 		public static object Detach() => RunManagerAction(mgr => mgr.DetachAll());
 
-		[Command("dnspy.get_loaded_assemblies", MCPCmdDescription = "Get all loaded assemblies.")]
+		[Command("get_loaded_assemblies", MCPCmdDescription = "Get all loaded assemblies.")]
 		public static string Get_Loaded_Assemblies() {
 			if (Global.MyTreeView == null)
 				return "TreeView not available.";
@@ -341,7 +372,7 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.list_modules", MCPCmdDescription = "List loaded module nodes (module name/path + assembly info).")]
+		[Command("list_modules", MCPCmdDescription = "List loaded module nodes (module name/path + assembly info).")]
 		public static object List_Modules() {
 			if (Global.MyTreeView == null)
 				return new { error = "TreeView not available." };
@@ -363,7 +394,7 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.open_all_modules", MCPCmdDescription = "Load all modules from the attached debuggee process(es) into Assembly Explorer.")]
+		[Command("open_all_modules", MCPCmdDescription = "Load all modules from the attached debuggee process(es) into Assembly Explorer.")]
 		public static object Open_All_Modules(int? process_id = null, bool? include_dynamic = null, bool? include_in_memory = null, int? wait_ms = null) {
 			if (Global.MyTreeView == null)
 				return new { error = "TreeView not available." };
@@ -500,7 +531,7 @@ namespace Example1.Extension {
 			};
 		}
 
-		[Command("dnspy.classes_from_namespace", MCPCmdDescription = "List all classes under a namespace.")]
+		[Command("classes_from_namespace", MCPCmdDescription = "List all classes under a namespace.")]
 		public static string Classes_From_Namespace(string assemblyName, string namespaceName) {
 			if (Global.MyTreeView == null)
 				return "TreeView not available.";
@@ -522,7 +553,7 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.get_class_sourcecode", MCPCmdDescription = "Get a class decompiled source.")]
+		[Command("get_class_sourcecode", MCPCmdDescription = "Get a class decompiled source.")]
 		public static string Get_Class_Sourcecode(string assemblyName, string namespaceName, string className) {
 			if (Global.MyTreeView == null)
 				return "TreeView not available.";
@@ -543,7 +574,7 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.get_method_prototypes", MCPCmdDescription = "List all method prototypes from a class.")]
+		[Command("get_method_prototypes", MCPCmdDescription = "List all method prototypes from a class.")]
 		public static string Get_Method_Prototypes(string assemblyName, string namespaceName, string className) {
 			if (Global.MyTreeView == null)
 				return "TreeView not available.";
@@ -567,7 +598,7 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.get_method_sourcecode", MCPCmdDescription = "Get a method decompiled source.")]
+		[Command("get_method_sourcecode", MCPCmdDescription = "Get a method decompiled source.")]
 		public static string Get_Method_SourceCode(string assemblyName, string namespaceName, string className, string methodName) {
 			if (Global.MyTreeView == null)
 				return "TreeView not available.";
@@ -590,7 +621,7 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.get_function_opcodes", MCPCmdDescription = "Get IL opcodes for a method.")]
+		[Command("get_function_opcodes", MCPCmdDescription = "Get IL opcodes for a method.")]
 		public static string Get_Function_Opcodes(string assemblyName, string namespaceName, string className, string methodName) {
 			if (Global.MyTreeView == null)
 				return "TreeView not available.";
@@ -631,7 +662,7 @@ namespace Example1.Extension {
 			});
 		}
 
-		[Command("dnspy.open_file", MCPCmdDescription = "Open a file in dnSpy's Assembly Explorer (loads into the tree view).")]
+		[Command("open_file", MCPCmdDescription = "Open a file in dnSpy's Assembly Explorer (loads into the tree view).")]
 		public static object Open_File(string path, bool? select = null) {
 			if (Global.MyAppWindow == null || Global.MyTreeView == null)
 				return new { error = "dnSpy UI services not available." };
@@ -797,6 +828,26 @@ namespace Example1.Extension {
 			public string LineText { get; set; } = "";
 		}
 
+		sealed class BreakpointSnapshot {
+			public int Id { get; set; }
+			public bool Enabled { get; set; }
+			public object[] BoundBreakpoints { get; set; } = Array.Empty<object>();
+			public string BoundBreakpointsMessageSeverity { get; set; } = "";
+			public string BoundBreakpointsMessageText { get; set; } = "";
+			public uint? Token { get; set; }
+			public uint? ILOffset { get; set; }
+			public string? ModuleName { get; set; }
+			public string? AssemblyFullName { get; set; }
+		}
+
+		sealed class DecompiledLocationInfo {
+			public int? LineNumber { get; set; }
+			public string? LineText { get; set; }
+			public string? FullTypeName { get; set; }
+			public string? MethodName { get; set; }
+			public string? Error { get; set; }
+		}
+
 		sealed class DebugModuleCandidate {
 			public int ProcessId { get; set; }
 			public string ProcessName { get; set; } = "";
@@ -827,6 +878,144 @@ namespace Example1.Extension {
 				}
 			}
 			return list;
+		}
+
+		static DecompiledLocationInfo ResolveDecompiledLocation(string assemblyFullName, string moduleName, uint token, uint ilOffset) {
+			if (Global.MyTreeView == null || Global.MyDocumentTabService == null || Global.MyAppWindow == null) {
+				return new DecompiledLocationInfo { Error = "dnSpy UI/document services not available." };
+			}
+
+			MethodDef? method = null;
+			string inputModule = moduleName.Replace('/', '\\');
+			string inputFile = string.Empty;
+			try {
+				inputFile = Path.GetFileName(inputModule);
+			}
+			catch {
+				inputFile = inputModule;
+			}
+			var findErr = RunOnUI(() => {
+				foreach (var modNode in Global.MyTreeView!.GetAllModuleNodes().ToList()) {
+					var mod = modNode.GetModule();
+					if (mod == null || mod.Assembly == null)
+						continue;
+					if (!string.Equals(mod.Assembly.FullName, assemblyFullName, StringComparison.OrdinalIgnoreCase))
+						continue;
+					var modSimple = mod.Name.String ?? string.Empty;
+					var modPath = (mod.Location ?? string.Empty).Replace('/', '\\');
+					var modFile = string.Empty;
+					try {
+						modFile = Path.GetFileName(modPath);
+					}
+					catch {
+						modFile = modPath;
+					}
+
+					bool moduleMatches =
+						string.Equals(modSimple, inputModule, StringComparison.OrdinalIgnoreCase) ||
+						string.Equals(modPath, inputModule, StringComparison.OrdinalIgnoreCase) ||
+						(!string.IsNullOrEmpty(inputFile) && string.Equals(modSimple, inputFile, StringComparison.OrdinalIgnoreCase)) ||
+						(!string.IsNullOrEmpty(inputFile) && string.Equals(modFile, inputFile, StringComparison.OrdinalIgnoreCase));
+					if (!moduleMatches)
+						continue;
+
+					IMDTokenProvider? md = null;
+					try {
+						md = mod.ResolveToken(token);
+					}
+					catch {
+					}
+					if (md == null)
+						continue;
+
+					if (md is MethodDef mdef)
+						method = mdef;
+					else if (md is MemberRef mref)
+						method = mref.ResolveMethodDef();
+
+					if (method != null)
+						return (string?)null;
+				}
+				return "Method metadata not found in loaded tree modules.";
+			});
+
+			if (method == null) {
+				return new DecompiledLocationInfo {
+					Error = findErr ?? "Method metadata not found."
+				};
+			}
+
+			var content = GetDocumentViewerContent(method, out var contentError);
+			if (content == null) {
+				return new DecompiledLocationInfo {
+					FullTypeName = method.DeclaringType?.FullName,
+					MethodName = method.Name.String,
+					Error = contentError ?? "Failed to get decompiled content."
+				};
+			}
+
+			var debugInfo = FindMethodDebugInfo(content.MethodDebugInfos, method);
+			if (debugInfo == null) {
+				return new DecompiledLocationInfo {
+					FullTypeName = method.DeclaringType?.FullName,
+					MethodName = method.Name.String,
+					Error = "Method debug info not available for resolved method."
+				};
+			}
+
+			var stmt = debugInfo.GetSourceStatementByCodeOffset(ilOffset);
+			if (stmt == null) {
+				return new DecompiledLocationInfo {
+					FullTypeName = method.DeclaringType?.FullName,
+					MethodName = method.Name.String,
+					Error = "No matching source statement for IL offset."
+				};
+			}
+
+			var line = GetLineByTextOffset(content.Text, stmt.Value.TextSpan.Start);
+			if (line == null) {
+				return new DecompiledLocationInfo {
+					FullTypeName = method.DeclaringType?.FullName,
+					MethodName = method.Name.String,
+					Error = "Failed to map source statement text span to line."
+				};
+			}
+
+			return new DecompiledLocationInfo {
+				LineNumber = line.Value.lineNumber,
+				LineText = line.Value.lineText,
+				FullTypeName = method.DeclaringType?.FullName,
+				MethodName = method.Name.String,
+				Error = null
+			};
+		}
+
+		static (int lineNumber, string lineText)? GetLineByTextOffset(string text, int offset) {
+			if (string.IsNullOrEmpty(text))
+				return null;
+			if (offset < 0)
+				offset = 0;
+			if (offset >= text.Length)
+				offset = text.Length - 1;
+
+			int lineStart = offset;
+			while (lineStart > 0 && text[lineStart - 1] != '\n')
+				lineStart--;
+
+			int lineEnd = offset;
+			while (lineEnd < text.Length && text[lineEnd] != '\n')
+				lineEnd++;
+			if (lineEnd > lineStart && text[lineEnd - 1] == '\r')
+				lineEnd--;
+
+			int lineNumber = 1;
+			for (int i = 0; i < lineStart; i++) {
+				if (text[i] == '\n')
+					lineNumber++;
+			}
+
+			var lineText = text.Substring(lineStart, Math.Max(0, lineEnd - lineStart));
+			return (lineNumber, lineText);
 		}
 
 		static List<LineMatch> FindMatchingLines(string text, MethodDebugInfo info, string containsText) {

@@ -406,7 +406,8 @@ namespace Example1.Extension {
 				throw new ArgumentException("Missing tool name.");
 			}
 
-			if (!commands.TryGetValue(name, out var method)) {
+			var lookupName = NormalizeLegacyToolName(name);
+			if (!commands.TryGetValue(lookupName, out var method)) {
 				throw new ArgumentException("Unknown tool: " + name);
 			}
 
@@ -531,6 +532,12 @@ namespace Example1.Extension {
 			if (type == typeof(float) || type == typeof(double) || type == typeof(decimal))
 				return "number";
 			return "object";
+		}
+
+		static string NormalizeLegacyToolName(string name) {
+			if (name.StartsWith("dnspy.", StringComparison.OrdinalIgnoreCase))
+				return name.Substring("dnspy.".Length);
+			return name;
 		}
 
 		static bool IsNullable(Type type) =>

@@ -162,24 +162,52 @@ def main() -> int:
         tools = rpc("tools/list", {}, timeout_s=10)["result"]["tools"]
         tool_names = {t["name"] for t in tools}
 
+        def call_tool(name: str, arguments: dict, timeout_s: float = 10.0):
+            r = rpc("tools/call", {"name": name, "arguments": arguments}, timeout_s=timeout_s)
+            result = r.get("result", {})
+            if isinstance(result, dict):
+                if "structuredContent" in result:
+                    return result["structuredContent"]
+                content = result.get("content")
+                if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+                    if "json" in content[0]:
+                        return content[0]["json"]
+                    if "text" in content[0]:
+                        txt = content[0]["text"]
+                        if isinstance(txt, str):
+                            try:
+                                return json.loads(txt)
+                            except Exception:
+                                return txt
+            return result
+
+        def tname(base: str) -> str:
+            if base in tool_names:
+                return base
+            legacy = f"dnspy.{base}"
+            if legacy in tool_names:
+                return legacy
+            return base
+
         required = {
-            "dnspy.attach",
-            "dnspy.break_all",
-            "dnspy.continue",
-            "dnspy.get_status",
-            "dnspy.set_breakpoint_text",
-            "dnspy.list_breakpoints",
+            tname("attach"),
+            tname("break_all"),
+            tname("continue"),
+            tname("get_status"),
+            tname("set_breakpoint_text"),
+            tname("list_breakpoints"),
         }
-        missing = sorted(required - tool_names)
+        missing = sorted([n for n in required if n not in tool_names])
         if missing:
             print("Missing required tools:", missing)
             return 2
 
         def clear_all_breakpoints():
-            if "dnspy.list_breakpoints" not in tool_names or "dnspy.remove_breakpoint" not in tool_names:
+            list_bp = tname("list_breakpoints")
+            remove_bp = tname("remove_breakpoint")
+            if list_bp not in tool_names or remove_bp not in tool_names:
                 return
-            r = rpc("tools/call", {"name": "dnspy.list_breakpoints", "arguments": {}}, timeout_s=10)
-            bp_json = r["result"]["content"][0]["json"]
+            bp_json = call_tool(list_bp, {}, timeout_s=10)
             if not isinstance(bp_json, list):
                 return
             removed = 0
@@ -189,16 +217,16 @@ def main() -> int:
                 bp_id = bp.get("id")
                 if not isinstance(bp_id, int):
                     continue
-                rpc("tools/call", {"name": "dnspy.remove_breakpoint", "arguments": {"id": bp_id}}, timeout_s=10)
+                call_tool(remove_bp, {"id": bp_id}, timeout_s=10)
                 removed += 1
             if removed:
                 print("cleared_breakpoints:", removed)
 
         def module_loaded(target_module_name: str) -> bool:
-            if "dnspy.list_modules" not in tool_names:
+            list_mods = tname("list_modules")
+            if list_mods not in tool_names:
                 return False
-            r = rpc("tools/call", {"name": "dnspy.list_modules", "arguments": {}}, timeout_s=10)
-            mods = r["result"]["content"][0]["json"]
+            mods = call_tool(list_mods, {}, timeout_s=10)
             if not isinstance(mods, list):
                 return False
             target = target_module_name.lower()
@@ -213,23 +241,15 @@ def main() -> int:
         clear_all_breakpoints()
 
         if pid is not None:
-            r = rpc("tools/call", {"name": "dnspy.attach", "arguments": {"process_id": pid}}, timeout_s=20)
-            attach_res = r["result"]["content"][0]["json"]
+            attach_res = call_tool(tname("attach"), {"process_id": pid}, timeout_s=20)
             print("attach:", attach_res)
             clear_all_breakpoints()
 
             open_all_modules_error = None
-            if "dnspy.open_all_modules" in tool_names:
+            open_all = tname("open_all_modules")
+            if open_all in tool_names:
                 for _ in range(3):
-                    r = rpc(
-                        "tools/call",
-                        {
-                            "name": "dnspy.open_all_modules",
-                            "arguments": {"process_id": pid, "wait_ms": 5000},
-                        },
-                        timeout_s=30,
-                    )
-                    open_all_modules_res = r["result"]["content"][0]["json"]
+                    open_all_modules_res = call_tool(open_all, {"process_id": pid, "wait_ms": 5000}, timeout_s=30)
                     print("open_all_modules:", open_all_modules_res)
                     if isinstance(open_all_modules_res, dict) and open_all_modules_res.get("error"):
                         open_all_modules_error = open_all_modules_res.get("error")
@@ -237,14 +257,10 @@ def main() -> int:
                         open_all_modules_error = None
                         break
                     time.sleep(0.4)
-            if (open_all_modules_error is not None or "dnspy.open_all_modules" not in tool_names) and "dnspy.open_file" in tool_names:
-                r = rpc(
-                    "tools/call",
-                    {"name": "dnspy.open_file", "arguments": {"path": debug_target_exe}},
-                    timeout_s=20,
-                )
-                print("open_file:", r["result"]["content"][0]["json"])
-            elif "dnspy.open_all_modules" not in tool_names:
+            open_file = tname("open_file")
+            if (open_all_modules_error is not None or open_all not in tool_names) and open_file in tool_names:
+                print("open_file:", call_tool(open_file, {"path": debug_target_exe}, timeout_s=20))
+            elif open_all not in tool_names:
                 print(
                     "note: server does not expose dnspy.open_all_modules or dnspy.open_file; "
                     "dnspy.set_breakpoint_text searches dnSpy's Assembly Explorer tree. "
@@ -260,31 +276,27 @@ def main() -> int:
 
             bp_res = None
             for attempt in range(1, max(1, args.set_breakpoint_retries) + 1):
-                r = rpc(
-                    "tools/call",
+                bp_res = call_tool(
+                    tname("set_breakpoint_text"),
                     {
-                        "name": "dnspy.set_breakpoint_text",
-                        "arguments": {
-                            "full_type_name": "McpDebugTarget.Worker",
-                            "method_name": "Compute",
-                            "decompiled_line_contains": "int sum = Add",
-                            "occurrence": 1,
-                            "assembly_name": "McpDebugTarget",
-                        },
+                        "full_type_name": "McpDebugTarget.Worker",
+                        "method_name": "Compute",
+                        "decompiled_line_contains": "int sum = Add",
+                        "occurrence": 1,
+                        "assembly_name": "McpDebugTarget",
                     },
                     timeout_s=20,
                 )
-                bp_res = r["result"]["content"][0]["json"]
                 if not (isinstance(bp_res, dict) and bp_res.get("error") == "Method not found."):
                     break
                 if attempt < max(1, args.set_breakpoint_retries):
                     time.sleep(0.5)
             print("set_breakpoint_text:", bp_res)
             if isinstance(bp_res, dict) and bp_res.get("error") == "Method not found.":
-                if "dnspy.get_loaded_assemblies" in tool_names:
+                get_loaded = tname("get_loaded_assemblies")
+                if get_loaded in tool_names:
                     try:
-                        la = rpc("tools/call", {"name": "dnspy.get_loaded_assemblies", "arguments": {}}, timeout_s=10)
-                        la_json = la["result"]["content"][0]["json"]
+                        la_json = call_tool(get_loaded, {}, timeout_s=10)
                         print("get_loaded_assemblies:", la_json)
                     except Exception as exc:
                         print("get_loaded_assemblies: error:", str(exc))
@@ -292,14 +304,12 @@ def main() -> int:
 
             deadline = time.time() + args.timeout_seconds
             while time.time() < deadline:
-                st = rpc("tools/call", {"name": "dnspy.get_status", "arguments": {}}, timeout_s=10)
-                st_json = st["result"]["content"][0]["json"]
+                st_json = call_tool(tname("get_status"), {}, timeout_s=10)
                 if st_json.get("state") == "break":
                     print("get_status (break):", st_json)
                     return 0
                 time.sleep(0.5)
-            st = rpc("tools/call", {"name": "dnspy.get_status", "arguments": {}}, timeout_s=10)
-            print("get_status (timeout):", st["result"]["content"][0]["json"])
+            print("get_status (timeout):", call_tool(tname("get_status"), {}, timeout_s=10))
             return 3
 
         # If not spawning a target, just print tool list for basic sanity.
