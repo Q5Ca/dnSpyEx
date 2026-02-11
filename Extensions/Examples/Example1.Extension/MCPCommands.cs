@@ -178,9 +178,9 @@ namespace Example1.Extension {
 			string? module_id = null) {
 
 			if (Global.MyTreeView == null || Global.MyAppWindow == null || Global.MyDocumentTabService == null)
-				return new { error = "dnSpy UI services not available." };
+				return ErrorResult("ui_services_not_available", "dnSpy UI services not available.");
 			if (Global.DbgCodeBreakpointsService == null || Global.DbgDotNetCodeLocationFactory == null || Global.ModuleIdProvider == null)
-				return new { error = "Debugger services not available." };
+				return ErrorResult("debugger_services_not_available", "Debugger services not available.");
 
 			var methodResult = FindMethod(full_type_name, method_name, assembly_name, module_name, module_path, process_id, module_id);
 			if (methodResult.Error != null) {
@@ -192,33 +192,45 @@ namespace Example1.Extension {
 						candidates = methodResult.Candidates ?? Array.Empty<object>()
 					};
 				}
-				return new { error = methodResult.Error };
+				return ErrorResult(methodResult.ErrorCode ?? "method_lookup_failed", methodResult.Error);
 			}
 
 			var selected = methodResult.Candidate!;
 			var method = selected.Method;
 			var module = method.Module;
+			var selectedOutputPath = !string.IsNullOrWhiteSpace(module_path)
+				? NormalizePath(module_path)
+				: (!string.IsNullOrWhiteSpace(selected.RuntimeModulePath) ? selected.RuntimeModulePath : selected.ModulePath);
 
 			var snapshot = GetMethodDecompiledSnapshot(method, out var contentError);
 			if (snapshot == null)
-				return new { error = contentError ?? "Failed to get decompiled content." };
+				return ErrorResult("decompiled_content_unavailable", contentError ?? "Failed to get decompiled content.");
 
 			var debugInfo = FindMethodDebugInfo(snapshot.MethodDebugInfos, method);
 			if (debugInfo == null)
-				return new { error = "Method debug info not available for the target method." };
+				return ErrorResult("method_debug_info_unavailable", "Method debug info not available for the target method.");
 
 			var matches = FindMatchingLines(snapshot.Text, debugInfo, decompiled_line_contains);
 			if (matches.Count == 0)
-				return new { error = "No matching decompiled line found." };
+				return ErrorResult("decompiled_line_not_found", "No matching decompiled line found.", new {
+					match_text = decompiled_line_contains,
+					module_id = selected.ModuleId,
+					process_id = selected.ProcessId,
+					module_path = selectedOutputPath
+				});
 
 			if (occurrence == null && matches.Count > 1) {
-				return new { error = "Multiple matching lines found. Provide more specific text or filters.", match_count = matches.Count };
+				return ErrorResult("ambiguous_line_match", "Multiple matching lines found. Provide more specific text or filters.", new {
+					match_count = matches.Count
+				});
 			}
 
 			int chosenIndex = 0;
 			if (occurrence != null) {
 				if (occurrence <= 0 || occurrence > matches.Count)
-					return new { error = "Occurrence is out of range.", match_count = matches.Count };
+					return ErrorResult("invalid_occurrence", "Occurrence is out of range.", new {
+						match_count = matches.Count
+					});
 				chosenIndex = occurrence.Value - 1;
 			}
 
@@ -226,34 +238,76 @@ namespace Example1.Extension {
 			var pos = match.LineStart + match.LineText.IndexOf(decompiled_line_contains, StringComparison.Ordinal);
 			var statement = debugInfo.GetSourceStatementByTextOffset(match.LineStart, match.LineEnd, pos);
 			if (statement == null)
-				return new { error = "Failed to map the line to IL." };
+				return ErrorResult("il_mapping_failed", "Failed to map the line to IL.");
 
 			var ilOffset = statement.Value.ILSpan.Start;
 			var token = method.MDToken.Raw;
 			var moduleIdValue = selected.ModuleIdValue;
-			var runtimeModuleId = TryResolveRuntimeModuleId(selected.ModulePath, process_id ?? selected.ProcessId);
+			var modulePathHint = selectedOutputPath;
+			var runtimeModuleId = TryResolveRuntimeModuleId(modulePathHint, process_id ?? selected.ProcessId);
 			if (runtimeModuleId != null)
 				moduleIdValue = runtimeModuleId.Value;
 			// Use Approximate mapping: dnSpy's own breakpoint placement often uses approximate mapping
 			// and it improves reliability across small decompiler/IL mapping differences.
 			var location = Global.DbgDotNetCodeLocationFactory.Create(moduleIdValue, token, ilOffset, DbgILOffsetMapping.Approximate);
+			var existing = RunOnDbgDispatcher(() => FindExistingCodeBreakpoint(moduleIdValue, token, ilOffset));
+			if (existing != null) {
+				return new {
+					id = existing.Id,
+					module_id = selected.ModuleId,
+					process_id = selected.ProcessId,
+					module_path = modulePathHint,
+					il_offset = ilOffset,
+					token_hex = "0x" + token.ToString("X8"),
+					module_name = module.Name.String,
+					assembly_full_name = module.Assembly.FullName,
+					line_number = match.LineNumber,
+					line_text = match.LineText,
+					already_exists = true
+				};
+			}
 			var settings = new DbgCodeBreakpointSettings { IsEnabled = true };
 			var added = RunOnDbgDispatcher(() =>
 				Global.DbgCodeBreakpointsService.Add(new DbgCodeBreakpointInfo(location, settings))
 			);
-			if (added == null)
-				return new { error = "Failed to add breakpoint." };
+			if (added == null) {
+				var existingAfterAdd = RunOnDbgDispatcher(() => FindExistingCodeBreakpoint(moduleIdValue, token, ilOffset));
+				if (existingAfterAdd != null) {
+					return new {
+						id = existingAfterAdd.Id,
+						module_id = selected.ModuleId,
+						process_id = selected.ProcessId,
+						module_path = modulePathHint,
+						il_offset = ilOffset,
+						token_hex = "0x" + token.ToString("X8"),
+						module_name = module.Name.String,
+						assembly_full_name = module.Assembly.FullName,
+						line_number = match.LineNumber,
+						line_text = match.LineText,
+						already_exists = true
+					};
+				}
+				return ErrorResult("breakpoint_add_failed", "Failed to add breakpoint.", new {
+					module_id = selected.ModuleId,
+					process_id = selected.ProcessId,
+					module_path = modulePathHint,
+					token_hex = "0x" + token.ToString("X8"),
+					il_offset = ilOffset
+				});
+			}
 
 			return new {
 				id = added.Id,
 				module_id = selected.ModuleId,
 				process_id = selected.ProcessId,
+				module_path = modulePathHint,
 				il_offset = ilOffset,
 				token_hex = "0x" + token.ToString("X8"),
 				module_name = module.Name.String,
 				assembly_full_name = module.Assembly.FullName,
 				line_number = match.LineNumber,
-				line_text = match.LineText
+				line_text = match.LineText,
+				already_exists = false
 			};
 		}
 
@@ -920,7 +974,7 @@ namespace Example1.Extension {
 			};
 		}
 
-		[Command("classes_from_namespace", MCPCmdDescription = "List classes under a namespace. Returns structured rows deduped by (module_id, full_type_name). Optional process_id can scope results to a debuggee process.")]
+		[Command("classes_from_namespace", MCPCmdDescription = "List classes under a namespace. Returns structured rows deduped by (module_id, full_type_name). Optional process_id can scope results to a debuggee process. module_path prefers runtime module path when available.")]
 		public static object Classes_From_Namespace(string assemblyName, string namespaceName, int? process_id = null) {
 			if (Global.MyTreeView == null)
 				return ErrorResult("treeview_not_available", "TreeView not available.");
@@ -974,7 +1028,7 @@ namespace Example1.Extension {
 							list.Add(new {
 								full_type_name = t.FullName,
 								module_id = match.ModuleId,
-								module_path = normalizedPath,
+								module_path = match.ModulePath,
 								assembly_name = mod.Assembly?.Name.String,
 								process_id = match.ProcessId
 							});
@@ -1201,6 +1255,7 @@ namespace Example1.Extension {
 		sealed class MethodCandidate {
 			public MethodDef Method { get; set; } = null!;
 			public string ModulePath { get; set; } = "";
+			public string RuntimeModulePath { get; set; } = "";
 			public string ModuleName { get; set; } = "";
 			public string AssemblySimpleName { get; set; } = "";
 			public string AssemblyFullName { get; set; } = "";
@@ -1243,9 +1298,6 @@ namespace Example1.Extension {
 						continue;
 
 					var normalizedPath = NormalizePath(mod.Location);
-					if (!string.IsNullOrWhiteSpace(modulePath) &&
-						!string.Equals(normalizedPath, NormalizePath(modulePath), StringComparison.OrdinalIgnoreCase))
-						continue;
 
 					var asmSimple = mod.Assembly?.Name.String ?? string.Empty;
 					var asmFull = mod.Assembly?.FullName ?? string.Empty;
@@ -1269,14 +1321,14 @@ namespace Example1.Extension {
 			});
 
 			if (baseCandidates.Count == 0)
-				return new MethodLookupResult { Error = "Method not found." };
+				return new MethodLookupResult { Error = "Method not found.", ErrorCode = "method_not_found" };
 
 			var runtimeModules = CollectRuntimeModuleInfos();
 			var expanded = ExpandMethodCandidates(baseCandidates, runtimeModules);
 			var filtered = ApplyMethodCandidateFilters(expanded, assemblyName, moduleName, modulePath, processId, moduleId);
 
 			if (filtered.Count == 0)
-				return new MethodLookupResult { Error = "Method not found." };
+				return new MethodLookupResult { Error = "Method not found.", ErrorCode = "method_not_found" };
 
 			if (filtered.Count > 1) {
 				return new MethodLookupResult {
@@ -1287,6 +1339,8 @@ namespace Example1.Extension {
 							module_id = c.ModuleId,
 							process_id = c.ProcessId,
 							module_path = c.ModulePath,
+							runtime_module_path = !string.IsNullOrWhiteSpace(c.RuntimeModulePath) ? c.RuntimeModulePath : null,
+							assembly_full_name = c.AssemblyFullName,
 							full_type_name = c.Method.DeclaringType?.FullName,
 							method_name = c.Method.Name.String,
 							token_hex = "0x" + c.Method.MDToken.Raw.ToString("X8")
@@ -1310,12 +1364,13 @@ namespace Example1.Extension {
 						? ModuleId.Create(b.ModulePath)
 						: Global.ModuleIdProvider.Create(b.Method.Module);
 					var moduleIdText = ModuleIdToStableString(fallbackModuleId);
-					var key = moduleIdText + "|" + b.Method.MDToken.Raw.ToString("X8");
+					var key = moduleIdText + "|" + b.Method.MDToken.Raw.ToString("X8") + "|" + b.ModulePath;
 					if (!seen.Add(key))
 						continue;
 					list.Add(new MethodCandidate {
 						Method = b.Method,
 						ModulePath = b.ModulePath,
+						RuntimeModulePath = b.ModulePath,
 						ModuleName = b.ModuleName,
 						AssemblySimpleName = b.AssemblySimpleName,
 						AssemblyFullName = b.AssemblyFullName,
@@ -1327,12 +1382,15 @@ namespace Example1.Extension {
 				}
 
 				foreach (var m in matches) {
-					var key = m.ModuleId + "|" + b.Method.MDToken.Raw.ToString("X8") + "|" + m.ProcessId.ToString(CultureInfo.InvariantCulture);
+					// Include source module path in key so duplicate tree modules don't collapse
+					// into a single runtime candidate. This preserves ambiguity diagnostics.
+					var key = m.ModuleId + "|" + b.Method.MDToken.Raw.ToString("X8") + "|" + m.ProcessId.ToString(CultureInfo.InvariantCulture) + "|" + b.ModulePath;
 					if (!seen.Add(key))
 						continue;
 					list.Add(new MethodCandidate {
 						Method = b.Method,
 						ModulePath = b.ModulePath,
+						RuntimeModulePath = m.ModulePath,
 						ModuleName = b.ModuleName,
 						AssemblySimpleName = b.AssemblySimpleName,
 						AssemblyFullName = b.AssemblyFullName,
@@ -1360,7 +1418,17 @@ namespace Example1.Extension {
 			}
 			else if (!string.IsNullOrWhiteSpace(modulePath)) {
 				var normalizedPath = NormalizePath(modulePath);
-				filtered = filtered.Where(c => string.Equals(c.ModulePath, normalizedPath, StringComparison.OrdinalIgnoreCase));
+				// Prefer exact tree-module path match when present. Fallback to runtime path
+				// matching so callers can still target modules only visible from debug runtime.
+				var exactSource = filtered.Where(c => string.Equals(c.ModulePath, normalizedPath, StringComparison.OrdinalIgnoreCase)).ToList();
+				if (exactSource.Count != 0) {
+					filtered = exactSource;
+				}
+				else {
+					filtered = filtered.Where(c =>
+						string.Equals(c.ModulePath, normalizedPath, StringComparison.OrdinalIgnoreCase) ||
+						string.Equals(c.RuntimeModulePath, normalizedPath, StringComparison.OrdinalIgnoreCase));
+				}
 			}
 			else if (processId != null && !string.IsNullOrWhiteSpace(assemblyName)) {
 				usedProcessScopedAssembly = true;
@@ -1382,15 +1450,10 @@ namespace Example1.Extension {
 				filtered = filtered.Where(c => c.ProcessId == processId.Value);
 			}
 
-			// If no process-specific selector was provided, collapse same logical module/token duplicates.
-			if (processId == null && string.IsNullOrWhiteSpace(moduleId)) {
-				filtered = filtered
-					.GroupBy(c => c.ModuleId + "|" + c.Method.MDToken.Raw.ToString("X8"), StringComparer.OrdinalIgnoreCase)
-					.Select(g => g.First());
-			}
-
 			return filtered
 				.OrderBy(c => c.ModulePath, StringComparer.OrdinalIgnoreCase)
+				.ThenBy(c => c.RuntimeModulePath, StringComparer.OrdinalIgnoreCase)
+				.ThenBy(c => c.ProcessId ?? int.MinValue)
 				.ThenBy(c => c.Method.MDToken.Raw)
 				.ToList();
 		}
@@ -1489,6 +1552,10 @@ namespace Example1.Extension {
 						}
 					}
 				}
+				list = list
+					.GroupBy(a => a.ProcessId.ToString(CultureInfo.InvariantCulture) + "|" + a.ModuleId, StringComparer.OrdinalIgnoreCase)
+					.Select(a => a.First())
+					.ToList();
 				return list;
 			});
 		}
@@ -1526,6 +1593,22 @@ namespace Example1.Extension {
 
 				return (ModuleId?)null;
 			});
+		}
+
+		static DbgCodeBreakpoint? FindExistingCodeBreakpoint(ModuleId moduleId, uint token, uint ilOffset) {
+			if (Global.DbgCodeBreakpointsService == null)
+				return null;
+
+			foreach (var bp in Global.DbgCodeBreakpointsService.Breakpoints) {
+				if (bp.Location is not IDbgDotNetCodeLocation loc)
+					continue;
+				if (loc.Token != token || loc.Offset != ilOffset)
+					continue;
+				if (loc.Module != moduleId)
+					continue;
+				return bp;
+			}
+			return null;
 		}
 
 		static string NormalizePath(string? path) {
@@ -1748,12 +1831,26 @@ namespace Example1.Extension {
 						modFile = modPath;
 					}
 
-					bool moduleMatches =
+					bool exactMatch =
 						string.Equals(modSimple, inputModule, StringComparison.OrdinalIgnoreCase) ||
-						string.Equals(modPath, inputModule, StringComparison.OrdinalIgnoreCase) ||
-						(!string.IsNullOrEmpty(inputFile) && string.Equals(modSimple, inputFile, StringComparison.OrdinalIgnoreCase)) ||
-						(!string.IsNullOrEmpty(inputFile) && string.Equals(modFile, inputFile, StringComparison.OrdinalIgnoreCase));
-					if (!moduleMatches)
+						string.Equals(modPath, inputModule, StringComparison.OrdinalIgnoreCase);
+					bool fallbackFileMatch =
+						!string.IsNullOrEmpty(inputFile) &&
+						(string.Equals(modSimple, inputFile, StringComparison.OrdinalIgnoreCase) ||
+						 string.Equals(modFile, inputFile, StringComparison.OrdinalIgnoreCase));
+					bool inputLooksLikePath =
+						inputModule.IndexOf('\\') >= 0 ||
+						inputModule.IndexOf('/') >= 0 ||
+						inputModule.IndexOf(':') >= 0;
+
+					if (!exactMatch) {
+						// If caller passed a path-like module identifier, do not fall back to leaf-name matching,
+						// otherwise duplicate modules with same file name can resolve to stale tree nodes.
+						if (inputLooksLikePath || !fallbackFileMatch)
+							continue;
+					}
+
+					if (!(exactMatch || fallbackFileMatch))
 						continue;
 
 					IMDTokenProvider? md = null;

@@ -85,6 +85,16 @@
   - Dedup key is now `(module_id, full_type_name)`.
   - Each row includes:
     - `full_type_name`, `module_id`, `module_path`, `assembly_name`, `process_id`
+- Fixed duplicate-runtime/module ambiguity and idempotency in `set_breakpoint_text`:
+  - Candidate expansion no longer collapses distinct source modules that map to the same runtime module.
+  - `module_path` filtering now prefers exact source-path match before runtime-path fallback.
+  - Duplicate breakpoint adds now return success with `already_exists=true` and existing `id` instead of generic `breakpoint_add_failed`.
+- Fixed stale decompiled-line mapping in `get_status`/resolver:
+  - When module identity is path-like, decompiled resolver now avoids leaf-filename fallback that could select a stale tree node.
+  - This keeps `current_stop.decompiled_*` aligned with the actual runtime module path.
+- Improved `tools/mcp_smoke_test.py` robustness:
+  - Added `--breakpoint-line-contains` (default: `Add(`) so line anchors survive decompiler local-name differences.
+  - `evaluate_expression` now auto-selects a valid expression from live locals/args (eg `baseValue + value` or `a + value`).
 
 ## Verification
 
@@ -151,3 +161,8 @@
     - `classes_from_namespace` returns structured payload with `ok` and `classes`.
     - Full smoke test still passes after these changes:
       - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --timeout-seconds 60 --simulate-agent-delay --agent-delay-seconds 0.6`
+  - New smoke-test validation after selector and resolver fixes:
+    - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --timeout-seconds 70 --simulate-agent-delay --agent-delay-seconds 0.8`
+      - pass (`set_breakpoint_text` + debug tools + eval success)
+    - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --debug-target-exe C:\\work\\work1\\McpDebugTarget.exe --timeout-seconds 70 --simulate-agent-delay --agent-delay-seconds 0.8`
+      - pass (`module_path` correctly resolved to `C:\\work\\work1\\McpDebugTarget.exe`, `decompiled_line_text` matches runtime build, eval fallback expression `a + value` succeeds)

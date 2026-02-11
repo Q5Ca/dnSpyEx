@@ -128,6 +128,11 @@ def main() -> int:
     ap.add_argument("--iterations", type=int, default=0)
     ap.add_argument("--timeout-seconds", type=int, default=30)
     ap.add_argument("--set-breakpoint-retries", type=int, default=8)
+    ap.add_argument(
+        "--breakpoint-line-contains",
+        default="Add(",
+        help="Substring used by set_breakpoint_text to locate the target line inside Worker.Compute.",
+    )
     ap.add_argument("--simulate-agent-delay", action="store_true", help="Sleep between MCP calls to simulate agent thinking.")
     ap.add_argument("--agent-delay-seconds", type=float, default=1.0, help="Seconds to sleep between MCP calls when --simulate-agent-delay is enabled.")
     args = ap.parse_args()
@@ -285,7 +290,7 @@ def main() -> int:
                     {
                         "full_type_name": "McpDebugTarget.Worker",
                         "method_name": "Compute",
-                        "decompiled_line_contains": "int sum = Add",
+                        "decompiled_line_contains": args.breakpoint_line_contains,
                         "occurrence": 1,
                         "assembly_name": "McpDebugTarget",
                         "module_path": debug_target_exe,
@@ -346,12 +351,38 @@ def main() -> int:
                     )
                     print("get_variables (compact):", vars_compact_json)
 
+                    eval_expr = "baseValue + value"
+                    if isinstance(vars_json, dict) and isinstance(vars_json.get("variables"), list):
+                        variables = [v for v in vars_json["variables"] if isinstance(v, dict)]
+                        names = [str(v.get("name") or "") for v in variables]
+                        if not ("baseValue" in names and "value" in names):
+                            params = [
+                                n for n in names
+                                if n and n != "this" and n.replace("_", "a").isalnum()
+                                and any(v.get("kind") == "parameter" and str(v.get("name") or "") == n for v in variables)
+                            ]
+                            locals_ = [
+                                n for n in names
+                                if n and n != "this" and n.replace("_", "a").isalnum()
+                                and any(v.get("kind") == "local" and str(v.get("name") or "") == n for v in variables)
+                            ]
+                            if locals_ and params:
+                                eval_expr = f"{locals_[0]} + {params[0]}"
+                            elif len(params) >= 2:
+                                eval_expr = f"{params[0]} + {params[1]}"
+                            elif len(locals_) >= 2:
+                                eval_expr = f"{locals_[0]} + {locals_[1]}"
+                            elif locals_:
+                                eval_expr = locals_[0]
+                            elif params:
+                                eval_expr = params[0]
+
                     eval_json = call_tool(
                         tname("evaluate_expression"),
-                        {"expression": "baseValue + value", "frame_index": 0},
+                        {"expression": eval_expr, "frame_index": 0},
                         timeout_s=12,
                     )
-                    print("evaluate_expression:", eval_json)
+                    print("evaluate_expression:", {"expression": eval_expr, "result": eval_json})
                     eval_error_json = call_tool(
                         tname("evaluate_expression"),
                         {"expression": "baseValue +", "frame_index": 0},
