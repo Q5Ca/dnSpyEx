@@ -35,5 +35,9 @@
   - `tools/list` now returns short tool names.
   - Legacy `dnspy.get_status` still works via alias normalization.
   - `list_breakpoints` now resolves and returns decompiled line info when module metadata is available in the Assembly Explorer tree.
+  - Updated step tool descriptions to concise user phrasing:
+    - `step_over`: "Step over in decompiled view."
+    - `step_into`: "Step into in decompiled view."
+    - `step_out`: "Step out in decompiled view."
   - Smoke test passes:
     - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --timeout-seconds 40 --simulate-agent-delay --agent-delay-seconds 1.0`

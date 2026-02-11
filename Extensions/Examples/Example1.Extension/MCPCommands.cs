@@ -309,13 +309,13 @@ namespace Example1.Extension {
 		[Command("break_all", MCPCmdDescription = "Break all debugged processes.")]
 		public static object BreakAll() => RunManagerAction(mgr => mgr.BreakAll());
 
-		[Command("step_over", MCPCmdDescription = "Step over.")]
+		[Command("step_over", MCPCmdDescription = "Step over in decompiled view.")]
 		public static object StepOver() => Step(DbgStepKind.StepOver);
 
-		[Command("step_into", MCPCmdDescription = "Step into.")]
+		[Command("step_into", MCPCmdDescription = "Step into in decompiled view.")]
 		public static object StepInto() => Step(DbgStepKind.StepInto);
 
-		[Command("step_out", MCPCmdDescription = "Step out.")]
+		[Command("step_out", MCPCmdDescription = "Step out in decompiled view.")]
 		public static object StepOut() => Step(DbgStepKind.StepOut);
 
 		[Command("get_status", MCPCmdDescription = "Get current debugger state and last break.")]
