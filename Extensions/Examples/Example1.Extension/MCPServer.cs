@@ -265,11 +265,15 @@ namespace Example1.Extension {
 	}
 
 	class SimpleMcpServer {
-		readonly HttpListener listener = new HttpListener();
+		HttpListener listener = new HttpListener();
 		readonly Dictionary<string, MethodInfo> commands = new Dictionary<string, MethodInfo>(StringComparer.OrdinalIgnoreCase);
 		readonly Type commandSourceType;
 		readonly JavaScriptSerializer jsonSerializer = new JavaScriptSerializer();
 		readonly Dictionary<string, StreamWriter> sseSessions = new Dictionary<string, StreamWriter>();
+		internal static readonly string LogFilePath = Path.Combine(Path.GetTempPath(), "dnspy-mcp.log");
+		readonly string configuredHost;
+		readonly string configuredPort;
+		string activeHost;
 		bool isRunning;
 
 		public SimpleMcpServer(Type commandSourceType) {
@@ -282,11 +286,15 @@ namespace Example1.Extension {
 
 			var ipAddress = Environment.GetEnvironmentVariable("DNSPY_MCP_HOST");
 			if (string.IsNullOrWhiteSpace(ipAddress))
-				ipAddress = "+";
+				ipAddress = "0.0.0.0";
 			var port = Environment.GetEnvironmentVariable("DNSPY_MCP_PORT");
 			if (string.IsNullOrWhiteSpace(port))
 				port = "3003";
-			listener.Prefixes.Add("http://" + ipAddress + ":" + port + "/");
+			configuredHost = ipAddress.Trim();
+			configuredPort = port.Trim();
+			activeHost = configuredHost;
+			listener = CreateListener(configuredHost);
+			Log("SimpleMcpServer created. configuredHost=" + configuredHost + " configuredPort=" + configuredPort);
 		}
 
 		[AttributeUsage(AttributeTargets.Method, AllowMultiple = true, Inherited = false)]
@@ -299,9 +307,33 @@ namespace Example1.Extension {
 		public void Start() {
 			if (isRunning)
 				return;
-			listener.Start();
+			try {
+				listener.Start();
+				activeHost = configuredHost;
+				Log("HttpListener started on configured host. host=" + activeHost + " port=" + configuredPort);
+			}
+			catch (Exception ex) when (!IsLoopbackHost(configuredHost)) {
+				try {
+					try {
+						listener.Close();
+					}
+					catch {
+					}
+					listener = CreateListener("127.0.0.1");
+					listener.Start();
+					activeHost = "127.0.0.1";
+					Console.WriteLine("MCP bind fallback: failed to listen on " + configuredHost + ", using 127.0.0.1. Error: " + ex.Message);
+					Log("HttpListener fallback succeeded. requestedHost=" + configuredHost + " fallbackHost=127.0.0.1 port=" + configuredPort + " error=" + ex.Message);
+				}
+				catch {
+					Log("HttpListener fallback failed. requestedHost=" + configuredHost + " port=" + configuredPort + " error=" + ex.Message);
+					throw;
+				}
+			}
 			listener.BeginGetContext(OnRequest, null);
 			isRunning = true;
+			Console.WriteLine("MCP listening on http://" + activeHost + ":" + configuredPort + "/");
+			Log("MCP listening. activeHost=" + activeHost + " port=" + configuredPort);
 		}
 
 		public void Stop() {
@@ -309,6 +341,38 @@ namespace Example1.Extension {
 				return;
 			listener.Stop();
 			isRunning = false;
+		}
+
+		void ConfigurePrefix(string host) {
+			listener.Prefixes.Clear();
+			listener.Prefixes.Add("http://" + ToHttpListenerHost(host) + ":" + configuredPort + "/");
+		}
+
+		HttpListener CreateListener(string host) {
+			var l = new HttpListener();
+			l.Prefixes.Add("http://" + ToHttpListenerHost(host) + ":" + configuredPort + "/");
+			return l;
+		}
+
+		static string ToHttpListenerHost(string host) {
+			var trimmed = (host ?? string.Empty).Trim();
+			if (string.Equals(trimmed, "0.0.0.0", StringComparison.OrdinalIgnoreCase))
+				return "+";
+			return trimmed;
+		}
+
+		static bool IsLoopbackHost(string host) {
+			var trimmed = (host ?? string.Empty).Trim();
+			return string.Equals(trimmed, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+				string.Equals(trimmed, "localhost", StringComparison.OrdinalIgnoreCase);
+		}
+
+		internal static void Log(string message) {
+			try {
+				File.AppendAllText(LogFilePath, DateTime.UtcNow.ToString("o") + " " + message + Environment.NewLine);
+			}
+			catch {
+			}
 		}
 
 		void OnRequest(IAsyncResult ar) {

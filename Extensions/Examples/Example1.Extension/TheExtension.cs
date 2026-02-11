@@ -50,22 +50,30 @@ namespace Example1.Extension {
 
 		public void OnEvent(ExtensionEvent @event, object? obj) {
 			if (@event == ExtensionEvent.AppLoaded) {
+				SimpleMcpServer.Log("Extension AppLoaded event received.");
 				new Thread(() => {
 					dnWindow.MainWindow.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Normal, new Action(() => {
-						Global.MyTreeView = MyTreeView;
-						Global.MyAppWindow = dnWindow;
-						Global.MyDocumentTabService = MyTabService;
-						Global.DbgManager = DbgManager.Value;
-						Global.AttachableProcessesService = AttachableProcessesService.Value;
-						Global.DbgCodeBreakpointsService = DbgCodeBreakpointsService.Value;
-						Global.DbgDotNetCodeLocationFactory = DbgDotNetCodeLocationFactory.Value;
-						Global.DbgLanguageService = DbgLanguageService.Value;
-						Global.ModuleIdProvider = ModuleIdProvider;
+						try {
+							Global.MyTreeView = MyTreeView;
+							Global.MyAppWindow = dnWindow;
+							Global.MyDocumentTabService = MyTabService;
+							Global.DbgManager = DbgManager.Value;
+							Global.AttachableProcessesService = AttachableProcessesService.Value;
+							Global.DbgCodeBreakpointsService = DbgCodeBreakpointsService.Value;
+							Global.DbgDotNetCodeLocationFactory = DbgDotNetCodeLocationFactory.Value;
+							Global.DbgLanguageService = DbgLanguageService.Value;
+							Global.ModuleIdProvider = ModuleIdProvider;
 
-						Global.DebugState.Attach(Global.DbgManager);
+							Global.DebugState.Attach(Global.DbgManager);
 
-						Global.MySimpleMCPServer = new SimpleMcpServer(typeof(MCPCommands));
-						Global.MySimpleMCPServer.Start();
+							Global.MySimpleMCPServer = new SimpleMcpServer(typeof(MCPCommands));
+							Global.MySimpleMCPServer.Start();
+							SimpleMcpServer.Log("Extension startup completed.");
+						}
+						catch (Exception ex) {
+							SimpleMcpServer.Log("Extension startup failed: " + ex);
+							throw;
+						}
 					}));
 				}).Start();
 			}

@@ -95,6 +95,24 @@
 - Improved `tools/mcp_smoke_test.py` robustness:
   - Added `--breakpoint-line-contains` (default: `Add(`) so line anchors survive decompiler local-name differences.
   - `evaluate_expression` now auto-selects a valid expression from live locals/args (eg `baseValue + value` or `a + value`).
+- Updated MCP bind defaults:
+  - Default host is now `0.0.0.0` when `DNSPY_MCP_HOST` is unset.
+  - On bind failure, server automatically retries `127.0.0.1` fallback.
+- Added deploy packaging script:
+  - `tools/package_mcp_bundle.ps1`
+  - Builds and stages:
+    - dnSpy (`dnSpy.exe`, net48)
+    - built-in decompiler extension (`dnSpy.Decompiler.ILSpy.x.dll`)
+    - built-in debugger extensions (`dnSpy.Debugger*.x.dll`)
+    - MCP extension (`Example1.Extension.x.dll`)
+    - helper tools (`tools/mcp_client.py`, `tools/mcp_smoke_test.py`)
+  - Produces:
+    - folder: `dist/dnspy-mcp-win-x64`
+    - zip: `dist/dnspy-mcp-win-x64.zip`
+  - Includes launchers:
+    - `start-dnspy-mcp.ps1`
+    - `start-dnspy-mcp.cmd`
+  - Prevents duplicate MCP extension loading by removing `Example1.Extension.x.dll` from staged `dnspy` root and loading only from `--extension-directory`.
 
 ## Verification
 
@@ -166,3 +184,12 @@
       - pass (`set_breakpoint_text` + debug tools + eval success)
     - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --debug-target-exe C:\\work\\work1\\McpDebugTarget.exe --timeout-seconds 70 --simulate-agent-delay --agent-delay-seconds 0.8`
       - pass (`module_path` correctly resolved to `C:\\work\\work1\\McpDebugTarget.exe`, `decompiled_line_text` matches runtime build, eval fallback expression `a + value` succeeds)
+  - Packaging validation:
+    - `powershell -ExecutionPolicy Bypass -File tools\\package_mcp_bundle.ps1`
+      - completed successfully; zip created at `dist\\dnspy-mcp-win-x64.zip`.
+    - `powershell -ExecutionPolicy Bypass -File dist\\dnspy-mcp-win-x64\\start-dnspy-mcp.ps1`
+      - startup log confirms `host=0.0.0.0`, `port=3003`, listener started.
+    - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --timeout-seconds 8`
+      - pass (`tools/list` returned expected tool set).
+    - `python tools\\mcp_smoke_test.py --host 127.0.0.1 --port 3003 --spawn-debug-target --timeout-seconds 70 --simulate-agent-delay --agent-delay-seconds 0.6`
+      - pass (attach/breakpoint/status/stack/variables/eval flow works with packaged start).
